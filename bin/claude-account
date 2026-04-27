@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# claude-account — manage Claude Code account overlays.
+#
+# Usage:
+#   claude-account add <name>      Create a new overlay at ~/.claude-<name>/
+#   claude-account remove <name>   Delete the overlay (prompts; contains creds)
+#   claude-account list            List existing overlays
+#
+# After `add`, launch with: claude-as <name>
+set -euo pipefail
+
+CANONICAL="$HOME/.claude"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SHIM_SRC="$REPO_ROOT/lib/security-shim.sh"
+
+# Files/dirs that must stay per-overlay (never symlinked to canonical).
+# Either auth-related (must differ per account) or runtime state Claude writes.
+EXCLUDES=(
+  bin
+  .credentials.json
+  .claude.json
+  .claude.json.backup
+  policy-limits.json
+  sessions
+  mcp-needs-auth-cache.json
+  oauth-state.json
+)
+
+die() { printf 'claude-account: %s\n' "$*" >&2; exit 1; }
+info() { printf '==> %s\n' "$*"; }
+
+is_excluded() {
+  local entry="$1"
+  for e in "${EXCLUDES[@]}"; do [ "$entry" = "$e" ] && return 0; done
+  return 1
+}
+
+valid_name() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]
+}
+
+cmd_add() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "missing account name. Usage: claude-account add <name>"
+  valid_name "$name" || die "invalid name '$name' (use letters, digits, '-', '_')."
+
+  local overlay="$HOME/.claude-$name"
+  [ ! -e "$overlay" ] || die "overlay '$overlay' already exists. Remove it first or pick another name."
+  [ -f "$SHIM_SRC" ] || die "shim source not found at $SHIM_SRC (broken install?)"
+
+  # If canonical doesn't exist yet (Claude Code never launched), create an empty
+  # one so the symlinks land somewhere. Claude will populate it on first use.
+  mkdir -p "$CANONICAL"
+
+  info "Creating overlay at $overlay"
+  mkdir -p "$overlay/bin"
+
+  # Copy the security shim into the overlay's bin/.
+  install -m 0755 "$SHIM_SRC" "$overlay/bin/security"
+
+  # Symlink every entry in ~/.claude/ that isn't on the per-overlay exclude list.
+  shopt -s nullglob dotglob
+  for src in "$CANONICAL"/*  "$CANONICAL"/.[!.]*; do
+    local base
+    base="$(basename "$src")"
+    is_excluded "$base" && continue
+    # Skip any link that would shadow the bin/ we just created.
+    ln -s "$src" "$overlay/$base"
+  done
+  shopt -u nullglob dotglob
+
+  info "Overlay ready."
+
+  # Warn about the macOS Keychain entry that would otherwise win over our shim.
+  if command -v security >/dev/null 2>&1 \
+     && security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1; then
+    cat <<EOF
+
+WARNING: macOS Keychain already has an entry named "Claude Code-credentials".
+Claude Code may prefer that entry on first launch and ignore the per-overlay
+.credentials.json. If accounts unexpectedly share a login, delete it with:
+
+  security delete-generic-password -s "Claude Code-credentials"
+
+(You will be prompted to log in again on each overlay, which is the goal.)
+EOF
+  fi
+
+  cat <<EOF
+
+Next:
+  1. Open a new shell (or 'source' your rc) so 'claude-as' is available.
+  2. Run:  claude-as $name
+  3. Complete the OAuth login in your browser. Credentials will land in
+     $overlay/.credentials.json (plaintext on disk — this is the trade-off).
+
+EOF
+}
+
+cmd_remove() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "missing account name. Usage: claude-account remove <name>"
+  valid_name "$name" || die "invalid name '$name'."
+
+  local overlay="$HOME/.claude-$name"
+  [ -d "$overlay" ] || die "no overlay at $overlay."
+
+  printf 'About to delete %s (contains OAuth credentials). Continue? [y/N] ' "$overlay"
+  read -r reply
+  case "$reply" in
+    y|Y|yes|YES) ;;
+    *) info "aborted."; exit 0 ;;
+  esac
+
+  rm -rf "$overlay"
+  info "Removed $overlay."
+}
+
+cmd_list() {
+  local found=0
+  shopt -s nullglob
+  for d in "$HOME"/.claude-*/; do
+    [ -d "$d" ] || continue
+    local name
+    name="$(basename "$d")"
+    name="${name#.claude-}"
+    local has_creds="no"
+    [ -f "$d/.credentials.json" ] && has_creds="yes"
+    printf '  %-20s  %s  (logged in: %s)\n' "$name" "$d" "$has_creds"
+    found=1
+  done
+  shopt -u nullglob
+  if [ "$found" -eq 0 ]; then
+    info "no overlays found. Create one with: claude-account add <name>"
+  fi
+}
+
+main() {
+  local sub="${1:-}"
+  shift || true
+  case "$sub" in
+    add)    cmd_add    "$@" ;;
+    remove|rm) cmd_remove "$@" ;;
+    list|ls)   cmd_list ;;
+    ""|-h|--help|help)
+      sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
+      ;;
+    *) die "unknown command '$sub'. Try: add, remove, list." ;;
+  esac
+}
+
+main "$@"
