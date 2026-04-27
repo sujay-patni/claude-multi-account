@@ -103,6 +103,35 @@ claude-account remove work    # delete an overlay (prompts; OAuth token is remov
 You can name overlays anything (`claude-account add anthropic`,
 `claude-account add customer-x`, …) — the wrapper takes whatever you pass.
 
+## Show the active account in the statusline
+
+Once you're juggling overlays, it's easy to lose track of which account
+the current Claude Code session is running under. `examples/statusline-account-tag.sh`
+is a drop-in statusline that prints the overlay name (derived from
+`$CLAUDE_CONFIG_DIR`) alongside the usual dir / branch / model / context
+bar, so each tab shows its account at a glance.
+
+Install it:
+
+```bash
+cp examples/statusline-account-tag.sh ~/.claude/statusline-command.sh
+chmod +x ~/.claude/statusline-command.sh
+```
+
+Then point `~/.claude/settings.json` at it:
+
+```json
+{
+  "statusLine": { "type": "command", "command": "~/.claude/statusline-command.sh" }
+}
+```
+
+Because every overlay symlinks `settings.json` back to `~/.claude/`, this
+one change applies to all of them. Sessions launched with plain `claude`
+print no account tag; sessions launched with `claude-as <name>` print
+`[<name>]`. Edit the `case "$account"` block in the script to pick your
+own colours per account.
+
 ## Stale Keychain entry (important on existing installs)
 
 If you used Claude Code before installing this, you probably already have a
